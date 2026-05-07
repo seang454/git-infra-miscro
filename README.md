@@ -8,6 +8,10 @@ package these charts and publish them to a Helm OCI registry such as GitHub
 Container Registry (GHCR). The `git-ops-miscro` repository references the
 published chart versions.
 
+It also stores reusable Dockerfile templates under
+`dockerfile-shared-libray/`. Jenkins can use those templates when a scanned
+service does not provide its own Dockerfile.
+
 Recommended flow:
 
 ```text
@@ -34,6 +38,74 @@ git-infra-miscro GitHub repo
 | `websocket` | realtime websocket services |
 | `batch-job` | one-time Kubernetes Job workloads |
 | `database-migration` | database migration Jobs such as Flyway or Liquibase |
+
+## Dockerfile Shared Library
+
+Dockerfile templates live in:
+
+```text
+dockerfile-shared-libray/resources/dockerfiles/
+```
+
+The Jenkins helper lives in:
+
+```text
+dockerfile-shared-libray/vars/dockerfileTemplate.groovy
+```
+
+The helper maps scanner `technology` values to templates. Example:
+
+```groovy
+def template = dockerfileTemplate(technology: params.TECHNOLOGY)
+writeFile file: 'Dockerfile', text: libraryResource(template.resource)
+```
+
+Use the service Dockerfile if one exists. If it is missing, use the matching
+platform template from this shared library.
+
+## Jenkins Pipeline
+
+The reusable deployment pipeline is stored at:
+
+```text
+Jenkinsfile
+```
+
+It expects the scanner or Teamlife UI to pass service metadata such as:
+
+```text
+SERVICE_NAME
+SOURCE_REPO
+SERVICE_PATH
+ENVIRONMENT
+TECHNOLOGY
+BUILD_TOOL
+IMAGE_REPO
+VALUES_KEY
+```
+
+The pipeline clones the source service, creates a Dockerfile from the shared
+templates if one is missing, builds and pushes the image, then updates
+`git-ops-miscro` so Argo CD deploys the new image tag.
+
+Required Jenkins plugins:
+
+```text
+Pipeline
+Git
+Docker Pipeline or Docker CLI on the agent
+Pipeline Utility Steps
+Credentials Binding
+```
+
+Required Jenkins credential:
+
+```text
+github-token
+```
+
+Use a GitHub username/password credential where the password is a GitHub PAT
+with repository access and GHCR package push permissions.
 
 Each chart includes a `values.yaml` file with shared defaults. These defaults
 are packaged with the chart and published to GHCR together with the templates.
