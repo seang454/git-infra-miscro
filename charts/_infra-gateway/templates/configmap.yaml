@@ -1,0 +1,19 @@
+{{- $gateway := .Values.gateway | default dict }}
+{{- $routes := $gateway.routes | default list }}
+{{- if $routes }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-routes
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+data:
+  routes: |
+    {{- range $routes }}
+    - id: {{ .id }}
+      uri: {{ .uri }}
+      predicates:
+        - Path={{ .path }}
+    {{- end }}
+{{- end }}

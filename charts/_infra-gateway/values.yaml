@@ -1,0 +1,72 @@
+deployments:
+  gateway:
+    enabled: true
+    image:
+      repository: your-registry/gateway-server
+      tag: "latest"
+    replicaCount: 1
+    port: 8080
+    expose: true
+    ingress:
+      enabled: true
+      host: api.yourdomain.com
+      path: /
+    eureka:
+      url: "http://eurekaservice:8761/eureka"
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "300m"
+    env:
+      SPRING_PROFILES_ACTIVE: "default"
+
+gateway:
+  routes:
+    - id: account-service
+      uri: http://account-service:8080
+      path: /api/account/**
+    - id: customer-service
+      uri: http://customer-service:8080
+      path: /api/customer/**
+    - id: identity-service
+      uri: http://itp-identity-service:8080
+      path: /api/identity/**
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+imagePullSecrets: []
+imagePullPolicy: IfNotPresent
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

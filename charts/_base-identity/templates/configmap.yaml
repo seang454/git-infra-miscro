@@ -1,0 +1,14 @@
+{{- $configmap := .Values.configmap | default dict }}
+{{- if $configmap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+data:
+  {{- range $k, $v := ($configmap.data | default dict) }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+{{- end }}

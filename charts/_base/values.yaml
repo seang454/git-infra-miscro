@@ -1,0 +1,65 @@
+deployments:
+  api:
+    enabled: true
+    image:
+      repository: your-registry/backend-service
+      tag: "latest"
+    replicaCount: 1
+    port: 8080
+    expose: true
+    healthPath: /actuator/health
+    ingress:
+      enabled: true
+      host: backend-service.yourdomain.com
+      path: /
+    hpa:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 5
+      cpuUtilization: 70
+      memoryUtilization: 80
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "50m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+    env:
+      SPRING_PROFILES_ACTIVE: "default"
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+imagePullSecrets: []
+imagePullPolicy: IfNotPresent
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

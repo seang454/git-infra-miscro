@@ -1,0 +1,74 @@
+{{- range $name, $deploy := .Values.deployments }}
+{{- if $deploy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $.Release.Name }}
+    component: {{ $name }}
+spec:
+  replicas: {{ $deploy.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ $.Release.Name }}
+      component: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $.Release.Name }}
+        component: {{ $name }}
+    spec:
+      serviceAccountName: {{ $.Values.serviceAccount.name | default $.Release.Name }}
+      {{- if $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml $.Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      {{- if $.Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: "{{ $deploy.image.repository }}:{{ $deploy.image.tag }}"
+          imagePullPolicy: {{ $deploy.image.pullPolicy | default $.Values.imagePullPolicy | default "IfNotPresent" }}
+          {{- if $.Values.securityContext }}
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+          {{- end }}
+          ports:
+            - containerPort: {{ $deploy.port | default 8080 }}
+          env:
+            - name: EUREKA_CLIENT_SERVICEURL_DEFAULTZONE
+              value: {{ $deploy.eureka.url | default "http://eurekaservice:8761/eureka" }}
+            - name: SPRING_CLOUD_GATEWAY_ROUTES
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $.Release.Name }}-routes
+                  key: routes
+            {{- if $deploy.env }}
+            {{- range $k, $v := $deploy.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+          {{- if $deploy.resources }}
+          resources:
+            {{- toYaml $deploy.resources | nindent 12 }}
+          {{- end }}
+      {{- if $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml $.Values.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if $.Values.affinity }}
+      affinity:
+        {{- toYaml $.Values.affinity | nindent 8 }}
+      {{- end }}
+      {{- if $.Values.tolerations }}
+      tolerations:
+        {{- toYaml $.Values.tolerations | nindent 8 }}
+      {{- end }}
+---
+{{- end }}
+{{- end }}

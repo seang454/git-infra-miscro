@@ -1,0 +1,67 @@
+deployments:
+  config:
+    enabled: true
+    image:
+      repository: your-registry/configserver
+      tag: "latest"
+    replicaCount: 1
+    port: 8888
+    expose: true
+    ingress:
+      enabled: false
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "200m"
+    env:
+      SPRING_PROFILES_ACTIVE: "default"
+
+configserver:
+  config:
+    branch: "main"
+    searchPaths: "/**"
+
+secret:
+  enabled: true
+  gitUri: "https://github.com/your-org/itp-config-repo"
+  gitUsername: "your-git-username"
+  gitPassword: "your-git-token"
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+imagePullSecrets: []
+imagePullPolicy: IfNotPresent
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

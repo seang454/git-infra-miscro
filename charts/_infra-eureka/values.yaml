@@ -1,0 +1,61 @@
+deployments:
+  eureka:
+    enabled: true
+    image:
+      repository: your-registry/eurekaservice
+      tag: "latest"
+    replicaCount: 1
+    port: 8761
+    expose: true
+    ingress:
+      enabled: false
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "300m"
+    env:
+      SPRING_PROFILES_ACTIVE: "default"
+
+eureka:
+  config:
+    selfPreservation: false
+    evictionInterval: 5000
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+imagePullSecrets: []
+imagePullPolicy: IfNotPresent
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

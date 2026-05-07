@@ -1,0 +1,20 @@
+{{- $configserver := .Values.configserver | default dict }}
+{{- $config := $configserver.config | default dict }}
+{{- if $config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+data:
+  application.yml: |
+    spring:
+      cloud:
+        config:
+          server:
+            git:
+              default-label: {{ $config.branch | default "main" }}
+              search-paths: {{ $config.searchPaths | default "/**" }}
+{{- end }}

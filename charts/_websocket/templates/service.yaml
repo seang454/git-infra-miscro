@@ -1,0 +1,22 @@
+{{- range $name, $deploy := .Values.deployments }}
+{{- if and $deploy.enabled $deploy.expose }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $.Release.Name }}
+    component: {{ $name }}
+spec:
+  selector:
+    app: {{ $.Release.Name }}
+    component: {{ $name }}
+  ports:
+    - name: websocket
+      port: {{ $deploy.port | default 8080 }}
+      targetPort: {{ $deploy.port | default 8080 }}
+  type: ClusterIP
+---
+{{- end }}
+{{- end }}

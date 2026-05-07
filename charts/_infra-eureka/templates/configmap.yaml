@@ -1,0 +1,20 @@
+{{- $eureka := .Values.eureka | default dict }}
+{{- $config := $eureka.config | default dict }}
+{{- if $config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+data:
+  application.yml: |
+    eureka:
+      server:
+        enable-self-preservation: {{ $config.selfPreservation | default false }}
+        eviction-interval-timer-in-ms: {{ $config.evictionInterval | default 5000 }}
+      client:
+        register-with-eureka: false
+        fetch-registry: false
+{{- end }}
