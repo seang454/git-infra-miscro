@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $Registry = if ($env:CHART_REGISTRY) {
     $env:CHART_REGISTRY
 } else {
-    "oci://ghcr.io/YOUR_ORG_OR_USERNAME/charts"
+    "ghcr.io/seang454/git-infra-miscro/charts"
 }
 
 $Version = if ($env:CHART_VERSION) {
