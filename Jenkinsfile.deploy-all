@@ -1,0 +1,124 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'prod'], description: 'GitOps environment to update')
+        text(name: 'SERVICES_JSON', defaultValue: '[]', description: 'JSON array of selected services from Teamlife')
+        string(name: 'BUILD_JOB_NAME', defaultValue: 'build-microservice-image', description: 'Jenkins job that uses Jenkinsfile')
+        string(name: 'PROMOTE_JOB_NAME', defaultValue: 'promote-gitops', description: 'Jenkins job that uses Jenkinsfile.gitops-promote')
+        string(name: 'GIT_OPS_REPO', defaultValue: 'https://github.com/seang454/git-ops-miscro.git', description: 'GitOps repo URL')
+        string(name: 'GIT_OPS_BRANCH', defaultValue: 'main', description: 'GitOps branch')
+    }
+
+    stages {
+        stage('Validate') {
+            steps {
+                script {
+                    List services = selectedServices()
+                    if (services.isEmpty()) {
+                        error 'SERVICES_JSON must contain at least one service.'
+                    }
+
+                    services.each { service ->
+                        requireServiceField(service, 'serviceName')
+                        requireServiceField(service, 'sourceRepo')
+                        requireServiceField(service, 'imageRepo')
+                        requireServiceField(service, 'valuesKey')
+                        requireServiceField(service, 'wave')
+                    }
+                }
+            }
+        }
+
+        stage('Build Images In Parallel') {
+            steps {
+                script {
+                    Map<String, Closure> branches = [:]
+
+                    selectedServices().each { service ->
+                        String branchName = service.serviceName.toString()
+                        branches[branchName] = {
+                            Map buildResult = buildImage(service)
+                            writeJSON(file: "image-result-${safeName(branchName)}.json", json: buildResult, pretty: 2)
+                        }
+                    }
+
+                    parallel branches
+                }
+            }
+        }
+
+        stage('Promote GitOps') {
+            steps {
+                script {
+                    List promoteServices = selectedServices().collect { service ->
+                        Map result = readJSON(file: "image-result-${safeName(service.serviceName.toString())}.json")
+                        return service + [
+                            imageTag : result.imageTag,
+                            fullImage: result.fullImage
+                        ]
+                    }
+
+                    String payload = groovy.json.JsonOutput.toJson(promoteServices)
+                    build job: params.PROMOTE_JOB_NAME,
+                        wait: true,
+                        propagate: true,
+                        parameters: [
+                            string(name: 'ENVIRONMENT', value: params.ENVIRONMENT),
+                            text(name: 'SERVICE_IMAGES_JSON', value: payload),
+                            string(name: 'GIT_OPS_REPO', value: params.GIT_OPS_REPO),
+                            string(name: 'GIT_OPS_BRANCH', value: params.GIT_OPS_BRANCH)
+                        ]
+                }
+            }
+        }
+    }
+}
+
+Map buildImage(Map service) {
+    def run = build job: params.BUILD_JOB_NAME,
+        wait: true,
+        propagate: true,
+        parameters: [
+            string(name: 'SERVICE_NAME', value: service.serviceName.toString()),
+            string(name: 'SOURCE_REPO', value: service.sourceRepo.toString()),
+            string(name: 'SERVICE_PATH', value: service.servicePath?.toString() ?: ''),
+            string(name: 'TECHNOLOGY', value: service.technology?.toString() ?: ''),
+            string(name: 'BUILD_TOOL', value: service.buildTool?.toString() ?: ''),
+            string(name: 'IMAGE_REPO', value: service.imageRepo.toString()),
+            string(name: 'IMAGE_TAG', value: service.imageTag?.toString() ?: '')
+        ]
+
+    copyArtifacts(
+        projectName: params.BUILD_JOB_NAME,
+        selector: specific(run.number.toString()),
+        filter: 'image-result.json',
+        target: "build-results/${safeName(service.serviceName.toString())}",
+        flatten: true
+    )
+
+    return readJSON(file: "build-results/${safeName(service.serviceName.toString())}/image-result.json")
+}
+
+List selectedServices() {
+    Object parsed = readJSON(text: params.SERVICES_JSON ?: '[]')
+    if (!(parsed instanceof List)) {
+        error 'SERVICES_JSON must be a JSON array.'
+    }
+    return parsed as List
+}
+
+void requireServiceField(Map service, String field) {
+    if (!service[field]?.toString()?.trim()) {
+        error "SERVICES_JSON item is missing required field: ${field}"
+    }
+}
+
+String safeName(String value) {
+    return value.replaceAll('[^A-Za-z0-9_.-]', '-')
+}

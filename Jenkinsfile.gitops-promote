@@ -1,0 +1,330 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'prod'], description: 'GitOps environment to update')
+        text(name: 'SERVICE_IMAGES_JSON', defaultValue: '[]', description: 'JSON array of built service image metadata')
+        string(name: 'GIT_OPS_REPO', defaultValue: 'https://github.com/seang454/git-ops-miscro.git', description: 'GitOps repo URL')
+        string(name: 'GIT_OPS_BRANCH', defaultValue: 'main', description: 'GitOps branch')
+    }
+
+    stages {
+        stage('Validate') {
+            steps {
+                script {
+                    List services = serviceImages()
+                    if (services.isEmpty()) {
+                        error 'SERVICE_IMAGES_JSON must contain at least one service.'
+                    }
+                    services.each { service ->
+                        requireServiceField(service, 'serviceName')
+                        requireServiceField(service, 'sourceRepo')
+                        requireServiceField(service, 'imageRepo')
+                        requireServiceField(service, 'imageTag')
+                        requireServiceField(service, 'valuesKey')
+                        requireServiceField(service, 'wave')
+                    }
+                }
+            }
+        }
+
+        stage('Checkout GitOps') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        rm -rf gitops
+                        git clone --branch "${GIT_OPS_BRANCH}" "https://${GITHUB_USER}:${GITHUB_TOKEN}@${GIT_OPS_REPO#https://}" gitops
+                    '''
+                }
+            }
+        }
+
+        stage('Promote By Wave') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+                    script {
+                        List services = serviceImages()
+                        List<Integer> waves = services.collect { parseWave(it.wave) }.unique().sort()
+
+                        waves.each { wave ->
+                            List waveServices = services.findAll { parseWave(it.wave) == wave }
+                            echo "Updating GitOps wave ${wave}: ${waveServices.collect { it.serviceName }.join(', ')}"
+
+                            waveServices.each { service ->
+                                bootstrapGitOpsService(service)
+                                updateGitOpsImage(service)
+                            }
+
+                            commitAndPushWave(wave, waveServices)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+List serviceImages() {
+    Object parsed = readJSON(text: params.SERVICE_IMAGES_JSON ?: '[]')
+    if (!(parsed instanceof List)) {
+        error 'SERVICE_IMAGES_JSON must be a JSON array.'
+    }
+    return parsed as List
+}
+
+void requireServiceField(Map service, String field) {
+    if (!service[field]?.toString()?.trim()) {
+        error "SERVICE_IMAGES_JSON item is missing required field: ${field}"
+    }
+}
+
+int parseWave(Object wave) {
+    try {
+        int parsed = wave.toString() as int
+        return parsed < 0 ? 0 : parsed
+    } catch (ignored) {
+        return 0
+    }
+}
+
+void bootstrapGitOpsService(Map service) {
+    String serviceName = service.serviceName.toString()
+    String serviceDir = "gitops/teams/itp/project-itp/${serviceName}"
+    String chartPath = "${serviceDir}/Chart.yaml"
+    String appPath = "${serviceDir}/app.yaml"
+    String devValuesPath = "${serviceDir}/environments/dev/values.yaml"
+    String prodValuesPath = "${serviceDir}/environments/prod/values.yaml"
+
+    sh "mkdir -p '${serviceDir}/environments/dev' '${serviceDir}/environments/prod'"
+
+    if (!fileExists(chartPath)) {
+        writeFile file: chartPath, text: serviceChartYaml(service)
+    }
+
+    writeFile file: appPath, text: appMetadataYaml(service)
+
+    if (!fileExists(devValuesPath)) {
+        writeYaml(file: devValuesPath, data: defaultValues(service, 'dev'))
+    }
+
+    if (!fileExists(prodValuesPath)) {
+        writeYaml(file: prodValuesPath, data: defaultValues(service, 'prod'))
+    }
+}
+
+void updateGitOpsImage(Map service) {
+    String serviceName = service.serviceName.toString()
+    String valuesPath = "gitops/teams/itp/project-itp/${serviceName}/environments/${params.ENVIRONMENT}/values.yaml"
+
+    if (!fileExists(valuesPath)) {
+        error "Values file not found: ${valuesPath}"
+    }
+
+    Map values = readYaml(file: valuesPath)
+    updateImage(values, service.valuesKey.toString(), service.imageRepo.toString(), service.imageTag.toString())
+    writeYaml(file: valuesPath, data: values, overwrite: true)
+}
+
+void commitAndPushWave(Integer wave, List waveServices) {
+    dir('gitops') {
+        sh """
+            set -e
+            git config user.email "jenkins@local"
+            git config user.name "jenkins"
+            git add "teams/itp/project-itp"
+
+            if git diff --cached --quiet; then
+              echo "No GitOps changes to commit for wave ${wave}."
+            else
+              git commit -m "Deploy ${params.ENVIRONMENT} wave ${wave}: ${waveServices.collect { it.serviceName }.join(', ')}"
+            fi
+        """
+    }
+
+    retry(5) {
+        dir('gitops') {
+            sh '''
+                set -e
+                git pull --rebase origin "${GIT_OPS_BRANCH}"
+                git push origin "HEAD:${GIT_OPS_BRANCH}"
+            '''
+        }
+    }
+}
+
+String serviceChartYaml(Map service) {
+    return """apiVersion: v2
+name: ${service.serviceName}
+version: 1.0.0
+type: application
+dependencies:
+  - name: ${service.valuesKey}
+    version: "1.0.0"
+    repository: "oci://ghcr.io/seang454/git-infra-miscro/charts"
+"""
+}
+
+String appMetadataYaml(Map service) {
+    String servicePath = service.servicePath?.toString()?.trim() ?: ''
+    String technology = service.technology?.toString()?.trim() ?: ''
+    String buildTool = service.buildTool?.toString()?.trim() ?: ''
+
+    return """service: ${service.serviceName}
+sourceRepo: ${service.sourceRepo}
+servicePath: ${servicePath}
+technology: ${technology}
+buildTool: ${buildTool}
+chart: ${service.valuesKey}
+chartPath: teams/itp/project-itp/${service.serviceName}
+wave: "${parseWave(service.wave)}"
+"""
+}
+
+Map defaultValues(Map service, String environment) {
+    String valuesKey = service.valuesKey.toString()
+    Map chartDefaults = readYaml(file: chartDefaultValuesPath(valuesKey)) ?: [:]
+    Map values = [(valuesKey): chartDefaults]
+    String imageTag = environment == params.ENVIRONMENT ? service.imageTag.toString() : "${environment}-latest"
+
+    updateImage(values, valuesKey, service.imageRepo.toString(), imageTag)
+    addEnvironmentDefaults(values, valuesKey, service.serviceName.toString(), environment)
+    return values
+}
+
+String chartDefaultValuesPath(String valuesKey) {
+    String chartFolder = chartFolderName(valuesKey)
+    String valuesPath = "charts/${chartFolder}/values.yaml"
+
+    if (!fileExists(valuesPath)) {
+        error "Default chart values file not found: ${valuesPath}"
+    }
+
+    return valuesPath
+}
+
+String chartFolderName(String valuesKey) {
+    Map folders = [
+        'base'              : '_base',
+        'base-identity'     : '_base-identity',
+        'base-frontend'     : '_base-frontend',
+        'infra-gateway'     : '_infra-gateway',
+        'infra-eureka'      : '_infra-eureka',
+        'infra-configserver': '_infra-configserver',
+        'worker'            : '_worker',
+        'scheduler'         : '_scheduler',
+        'bff'               : '_bff',
+        'websocket'         : '_websocket',
+        'batch-job'         : '_batch-job',
+        'database-migration': '_database-migration'
+    ]
+
+    if (!folders.containsKey(valuesKey)) {
+        error "Unsupported valuesKey: ${valuesKey}"
+    }
+
+    return folders[valuesKey]
+}
+
+void addEnvironmentDefaults(Map values, String valuesKey, String serviceName, String environment) {
+    String profile = environment == 'prod' ? 'prod' : 'dev'
+    String host = "${environment}-${serviceName}.yourdomain.com"
+
+    switch (valuesKey) {
+        case 'base':
+        case 'base-identity':
+        case 'bff':
+            Map api = ensurePath(values, [valuesKey, 'deployments', 'api'])
+            api.replicaCount = environment == 'prod' ? 2 : 1
+            api.env = ['SPRING_PROFILES_ACTIVE': profile]
+            ensurePath(values, [valuesKey, 'deployments', 'api', 'ingress']).host = host
+            break
+        case 'base-frontend':
+            Map app = ensurePath(values, [valuesKey, 'deployments', 'app'])
+            app.replicaCount = environment == 'prod' ? 2 : 1
+            app.env = ['NODE_ENV': environment == 'prod' ? 'production' : 'development']
+            ensurePath(values, [valuesKey, 'deployments', 'app', 'ingress']).host = host
+            break
+        case 'infra-gateway':
+            Map gateway = ensurePath(values, [valuesKey, 'deployments', 'gateway'])
+            gateway.replicaCount = environment == 'prod' ? 2 : 1
+            gateway.env = ['SPRING_PROFILES_ACTIVE': profile]
+            ensurePath(values, [valuesKey, 'deployments', 'gateway', 'ingress']).host = host
+            break
+        case 'infra-eureka':
+            Map eureka = ensurePath(values, [valuesKey, 'deployments', 'eureka'])
+            eureka.replicaCount = environment == 'prod' ? 2 : 1
+            eureka.env = ['SPRING_PROFILES_ACTIVE': profile]
+            break
+        case 'infra-configserver':
+            Map config = ensurePath(values, [valuesKey, 'deployments', 'config'])
+            config.replicaCount = environment == 'prod' ? 2 : 1
+            config.env = ['SPRING_PROFILES_ACTIVE': profile]
+            break
+        case 'worker':
+            ensurePath(values, [valuesKey, 'workers', 'app']).env = ['SPRING_PROFILES_ACTIVE': profile]
+            break
+        case 'scheduler':
+            ensurePath(values, [valuesKey, 'schedules', 'app']).env = ['SPRING_PROFILES_ACTIVE': profile]
+            break
+        case 'websocket':
+            Map ws = ensurePath(values, [valuesKey, 'deployments', 'ws'])
+            ws.replicaCount = environment == 'prod' ? 2 : 1
+            ws.env = ['SPRING_PROFILES_ACTIVE': profile]
+            ensurePath(values, [valuesKey, 'deployments', 'ws', 'ingress']).host = host
+            break
+        case 'batch-job':
+        case 'database-migration':
+            break
+    }
+}
+
+void updateImage(Map values, String valuesKey, String imageRepo, String imageTag) {
+    Map image = imageNode(values, valuesKey)
+    image.repository = imageRepo
+    image.tag = imageTag
+}
+
+Map imageNode(Map values, String valuesKey) {
+    switch (valuesKey) {
+        case 'base':
+        case 'base-identity':
+        case 'bff':
+            return ensurePath(values, [valuesKey, 'deployments', 'api', 'image'])
+        case 'base-frontend':
+            return ensurePath(values, [valuesKey, 'deployments', 'app', 'image'])
+        case 'infra-gateway':
+            return ensurePath(values, [valuesKey, 'deployments', 'gateway', 'image'])
+        case 'infra-eureka':
+            return ensurePath(values, [valuesKey, 'deployments', 'eureka', 'image'])
+        case 'infra-configserver':
+            return ensurePath(values, [valuesKey, 'deployments', 'config', 'image'])
+        case 'worker':
+            return ensurePath(values, [valuesKey, 'workers', 'app', 'image'])
+        case 'scheduler':
+            return ensurePath(values, [valuesKey, 'schedules', 'app', 'image'])
+        case 'websocket':
+            return ensurePath(values, [valuesKey, 'deployments', 'ws', 'image'])
+        case 'batch-job':
+            return ensurePath(values, [valuesKey, 'jobs', 'app', 'image'])
+        case 'database-migration':
+            return ensurePath(values, [valuesKey, 'migrations', 'app', 'image'])
+        default:
+            error "Unsupported valuesKey: ${valuesKey}"
+    }
+}
+
+Map ensurePath(Map root, List<String> keys) {
+    Map current = root
+    keys.each { key ->
+        if (!(current[key] instanceof Map)) {
+            current[key] = [:]
+        }
+        current = current[key] as Map
+    }
+    return current
+}

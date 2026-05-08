@@ -63,30 +63,218 @@ writeFile file: 'Dockerfile', text: libraryResource(template.resource)
 Use the service Dockerfile if one exists. If it is missing, use the matching
 platform template from this shared library.
 
-## Jenkins Pipeline
+## Jenkins Pipelines
 
-The reusable deployment pipeline is stored at:
+This repo has three Jenkins pipelines.
+
+### Deploy All Orchestrator
+
+The single endpoint for Teamlife is:
+
+```text
+Jenkinsfile.deploy-all
+```
+
+Create one Jenkins job:
+
+```text
+Job name: deploy-all-microservices
+Pipeline from SCM: git-infra-miscro
+Script path: Jenkinsfile.deploy-all
+```
+
+Teamlife calls only this job. It triggers image builds in parallel, waits for
+all builds to finish, collects their `image-result.json` artifacts, then calls
+the GitOps promote pipeline once.
+
+Parameters:
+
+```text
+ENVIRONMENT
+SERVICES_JSON
+BUILD_JOB_NAME
+PROMOTE_JOB_NAME
+GIT_OPS_REPO
+GIT_OPS_BRANCH
+```
+
+Example `SERVICES_JSON`:
+
+```json
+[
+  {
+    "serviceName": "configserver",
+    "sourceRepo": "https://github.com/seang454/project-services.git",
+    "servicePath": "configserver",
+    "technology": "spring-boot",
+    "buildTool": "gradle",
+    "imageRepo": "ghcr.io/seang454/configserver",
+    "valuesKey": "infra-configserver",
+    "wave": 0
+  },
+  {
+    "serviceName": "customer-service",
+    "sourceRepo": "https://github.com/seang454/project-services.git",
+    "servicePath": "customer-service",
+    "technology": "spring-boot",
+    "buildTool": "gradle",
+    "imageRepo": "ghcr.io/seang454/customer-service",
+    "valuesKey": "base",
+    "wave": 2
+  }
+]
+```
+
+### Build Image Pipeline
+
+The reusable image build pipeline is stored at:
 
 ```text
 Jenkinsfile
 ```
 
-It expects the scanner or Teamlife UI to pass service metadata such as:
+It expects Teamlife to pass one service at a time:
 
 ```text
 SERVICE_NAME
 SOURCE_REPO
 SERVICE_PATH
-ENVIRONMENT
 TECHNOLOGY
 BUILD_TOOL
 IMAGE_REPO
-VALUES_KEY
+IMAGE_TAG
 ```
 
 The pipeline clones the source service, creates a Dockerfile from the shared
-templates if one is missing, builds and pushes the image, then updates
-`git-ops-miscro` so Argo CD deploys the new image tag.
+templates if one is missing, builds the image, pushes it to the registry, and
+archives `image-result.json`.
+
+Example build result:
+
+```json
+{
+  "serviceName": "customer-service",
+  "sourceRepo": "https://github.com/seang454/project-services.git",
+  "servicePath": "customer-service",
+  "technology": "spring-boot",
+  "buildTool": "gradle",
+  "imageRepo": "ghcr.io/seang454/customer-service",
+  "imageTag": "build-25",
+  "fullImage": "ghcr.io/seang454/customer-service:build-25"
+}
+```
+
+Teamlife can run many build-image jobs in parallel.
+
+### GitOps Promote Pipeline
+
+The GitOps promotion pipeline is stored at:
+
+```text
+Jenkinsfile.gitops-promote
+```
+
+It expects Teamlife to pass all built image results in one JSON array:
+
+```text
+SERVICE_IMAGES_JSON
+ENVIRONMENT
+GIT_OPS_REPO
+GIT_OPS_BRANCH
+```
+
+Each item also needs the GitOps metadata chosen by the scanner/UI:
+
+```text
+valuesKey
+wave
+```
+
+Example promote input:
+
+```json
+[
+  {
+    "serviceName": "configserver",
+    "sourceRepo": "https://github.com/seang454/project-services.git",
+    "servicePath": "configserver",
+    "technology": "spring-boot",
+    "buildTool": "gradle",
+    "imageRepo": "ghcr.io/seang454/configserver",
+    "imageTag": "build-21",
+    "valuesKey": "infra-configserver",
+    "wave": 0
+  },
+  {
+    "serviceName": "customer-service",
+    "sourceRepo": "https://github.com/seang454/project-services.git",
+    "servicePath": "customer-service",
+    "technology": "spring-boot",
+    "buildTool": "gradle",
+    "imageRepo": "ghcr.io/seang454/customer-service",
+    "imageTag": "build-25",
+    "valuesKey": "base",
+    "wave": 2
+  }
+]
+```
+
+The promote pipeline checks out `git-ops-miscro`, creates missing service
+folders, reads default values from `charts/{chart}/values.yaml`, updates image
+tags, and pushes commits in wave order:
+
+```text
+wave 0 commit and push
+wave 1 commit and push
+wave 2 commit and push
+...
+wave n commit and push
+```
+
+The wave value is dynamic. Teamlife can assign `0..n` based on the number of
+detected services. The selected value is written to each service `app.yaml`:
+
+```yaml
+wave: "2"
+```
+
+Jenkins does not need Kubernetes access in this split. It only builds images and
+writes GitOps desired state. Argo CD handles the actual Kubernetes deployment.
+
+If the service does not already exist in `git-ops-miscro`, the pipeline creates
+the GitOps service folder automatically:
+
+```text
+teams/itp/project-itp/{SERVICE_NAME}/
+  Chart.yaml
+  app.yaml
+  environments/
+    dev/values.yaml
+    prod/values.yaml
+```
+
+The generated `Chart.yaml` depends on the selected platform chart from GHCR.
+The generated environment values files are created from the selected infra
+chart's default `values.yaml`, wrapped under the dependency chart name, then
+updated with service-specific values such as image repository, image tag,
+profile, replica count, and ingress host.
+
+For example, if `VALUES_KEY=base`, Jenkins reads:
+
+```text
+charts/_base/values.yaml
+```
+
+and writes GitOps values like:
+
+```yaml
+base:
+  deployments:
+    api:
+      image:
+        repository: ghcr.io/seang454/customer-service
+        tag: build-25
+```
 
 Required Jenkins plugins:
 
@@ -96,6 +284,7 @@ Git
 Docker Pipeline or Docker CLI on the agent
 Pipeline Utility Steps
 Credentials Binding
+Copy Artifact
 ```
 
 Required Jenkins credential:

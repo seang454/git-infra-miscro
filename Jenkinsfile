@@ -3,25 +3,16 @@ pipeline {
 
     options {
         timestamps()
-        disableConcurrentBuilds()
     }
 
     parameters {
         string(name: 'SERVICE_NAME', defaultValue: '', description: 'Service name, for example account-service')
         string(name: 'SOURCE_REPO', defaultValue: '', description: 'Source GitHub repo URL')
         string(name: 'SERVICE_PATH', defaultValue: '', description: 'Path to service inside repo. Empty means repo root')
-        choice(name: 'ENVIRONMENT', choices: ['dev', 'prod'], description: 'GitOps environment to update')
         string(name: 'TECHNOLOGY', defaultValue: 'spring-boot', description: 'Scanner technology value')
         string(name: 'BUILD_TOOL', defaultValue: 'gradle', description: 'Build tool hint, used by spring-boot: gradle or maven')
         string(name: 'IMAGE_REPO', defaultValue: 'ghcr.io/seang454/service-name', description: 'Image repository without tag')
-        string(name: 'VALUES_KEY', defaultValue: 'base', description: 'Helm values root key: base, worker, base-frontend, etc.')
-        string(name: 'GIT_OPS_REPO', defaultValue: 'https://github.com/seang454/git-ops-miscro.git', description: 'GitOps repo URL')
-        string(name: 'GIT_OPS_BRANCH', defaultValue: 'main', description: 'GitOps branch')
-    }
-
-    environment {
-        IMAGE_TAG = "build-${BUILD_NUMBER}"
-        FULL_IMAGE = "${params.IMAGE_REPO}:${IMAGE_TAG}"
+        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Optional image tag. Empty uses build-{BUILD_NUMBER}')
     }
 
     stages {
@@ -31,7 +22,8 @@ pipeline {
                     requireParam('SERVICE_NAME')
                     requireParam('SOURCE_REPO')
                     requireParam('IMAGE_REPO')
-                    requireParam('VALUES_KEY')
+                    env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim() ?: "build-${env.BUILD_NUMBER}"
+                    env.FULL_IMAGE = "${params.IMAGE_REPO}:${env.RESOLVED_IMAGE_TAG}"
                 }
             }
         }
@@ -85,49 +77,22 @@ pipeline {
             }
         }
 
-        stage('Checkout GitOps') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
-                    sh '''
-                        rm -rf gitops
-                        git clone --branch "${GIT_OPS_BRANCH}" "https://${GITHUB_USER}:${GITHUB_TOKEN}@${GIT_OPS_REPO#https://}" gitops
-                    '''
-                }
-            }
-        }
-
-        stage('Update GitOps Image Tag') {
+        stage('Write Build Result') {
             steps {
                 script {
-                    String valuesPath = "gitops/teams/itp/project-itp/${params.SERVICE_NAME}/environments/${params.ENVIRONMENT}/values.yaml"
-                    if (!fileExists(valuesPath)) {
-                        error "Values file not found: ${valuesPath}"
-                    }
-
-                    Map values = readYaml(file: valuesPath)
-                    updateImage(values, params.VALUES_KEY, params.IMAGE_REPO, env.IMAGE_TAG)
-                    writeYaml(file: valuesPath, data: values, overwrite: true)
-                }
-            }
-        }
-
-        stage('Commit GitOps Change') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
-                    dir('gitops') {
-                        sh '''
-                            git config user.email "jenkins@local"
-                            git config user.name "jenkins"
-                            git add "teams/itp/project-itp/${SERVICE_NAME}/environments/${ENVIRONMENT}/values.yaml"
-
-                            if git diff --cached --quiet; then
-                              echo "No GitOps changes to commit."
-                            else
-                              git commit -m "Deploy ${SERVICE_NAME} ${ENVIRONMENT} ${IMAGE_TAG}"
-                              git push origin "${GIT_OPS_BRANCH}"
-                            fi
-                        '''
-                    }
+                    Map result = [
+                        serviceName: params.SERVICE_NAME,
+                        sourceRepo : params.SOURCE_REPO,
+                        servicePath: params.SERVICE_PATH,
+                        technology : params.TECHNOLOGY,
+                        buildTool  : params.BUILD_TOOL,
+                        imageRepo  : params.IMAGE_REPO,
+                        imageTag   : env.RESOLVED_IMAGE_TAG,
+                        fullImage  : env.FULL_IMAGE
+                    ]
+                    writeJSON(file: 'image-result.json', json: result, pretty: 2)
+                    archiveArtifacts artifacts: 'image-result.json', fingerprint: true
+                    echo "IMAGE_RESULT_JSON=${groovy.json.JsonOutput.toJson(result)}"
                 }
             }
         }
@@ -135,7 +100,7 @@ pipeline {
 
     post {
         success {
-            echo "Published ${FULL_IMAGE} and updated git-ops for ${params.SERVICE_NAME}/${params.ENVIRONMENT}"
+            echo "Published ${FULL_IMAGE}"
         }
         always {
             sh 'docker logout ghcr.io || true'
@@ -193,50 +158,4 @@ String dockerfileTemplatePath(String technology, String buildTool) {
     }
 
     return templates[normalizedTechnology]
-}
-
-void updateImage(Map values, String valuesKey, String imageRepo, String imageTag) {
-    Map image = imageNode(values, valuesKey)
-    image.repository = imageRepo
-    image.tag = imageTag
-}
-
-Map imageNode(Map values, String valuesKey) {
-    switch (valuesKey) {
-        case 'base':
-        case 'base-identity':
-        case 'bff':
-            return ensurePath(values, [valuesKey, 'deployments', 'api', 'image'])
-        case 'base-frontend':
-            return ensurePath(values, [valuesKey, 'deployments', 'app', 'image'])
-        case 'infra-gateway':
-            return ensurePath(values, [valuesKey, 'deployments', 'gateway', 'image'])
-        case 'infra-eureka':
-            return ensurePath(values, [valuesKey, 'deployments', 'eureka', 'image'])
-        case 'infra-configserver':
-            return ensurePath(values, [valuesKey, 'deployments', 'config', 'image'])
-        case 'worker':
-            return ensurePath(values, [valuesKey, 'workers', 'app', 'image'])
-        case 'scheduler':
-            return ensurePath(values, [valuesKey, 'schedules', 'app', 'image'])
-        case 'websocket':
-            return ensurePath(values, [valuesKey, 'deployments', 'ws', 'image'])
-        case 'batch-job':
-            return ensurePath(values, [valuesKey, 'jobs', 'app', 'image'])
-        case 'database-migration':
-            return ensurePath(values, [valuesKey, 'migrations', 'app', 'image'])
-        default:
-            error "Unsupported VALUES_KEY: ${valuesKey}"
-    }
-}
-
-Map ensurePath(Map root, List<String> keys) {
-    Map current = root
-    keys.each { key ->
-        if (!(current[key] instanceof Map)) {
-            current[key] = [:]
-        }
-        current = current[key] as Map
-    }
-    return current
 }
